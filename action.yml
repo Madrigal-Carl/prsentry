@@ -10,6 +10,10 @@ inputs:
     description: 'GitHub token used to fetch diffs and post comments'
     required: false
     default: ${{ github.token }}
+  auto-approve:
+    description: 'Post all findings automatically without an interactive prompt. Leave this true unless you have a reason not to — GitHub Actions runners have no TTY, so the interactive approve/reject prompt cannot be answered in CI.'
+    required: false
+    default: 'true'
 
 runs:
   using: 'composite'
@@ -21,7 +25,8 @@ runs:
 
     - name: Run PRsentry review
       shell: bash
-      run: npx --yes github:Madrigal-Carl/prsentry#main review ${{ github.event.pull_request.number }} --repo ${{ github.repository }}
+      run: |
+        npx --yes github:Madrigal-Carl/prsentry#main review ${{ github.event.pull_request.number }} --repo ${{ github.repository }} ${{ inputs.auto-approve == 'true' && '--auto-approve' || '' }}
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
