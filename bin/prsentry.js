@@ -160,7 +160,7 @@ function loadEnv(cliEnvPath, config) {
 program
     .name("prsentry")
     .description("AI-powered PR reviewer that checks pull requests against your repo's style guide")
-    .version("0.1.3")
+    .version("1.1.3")
     .option(
         "-e, --env-file <path>",
         "path to a .env file containing GEMINI_API_KEY and GITHUB_TOKEN (overrides config and PRSENTRY_ENV_FILE)"
