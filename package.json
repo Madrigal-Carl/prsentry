@@ -1,10 +1,10 @@
 {
   "name": "prsentry",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AI-powered PR reviewer that checks pull requests against your repo's style guide",
   "type": "module",
   "bin": {
-    "prsentry": "./bin/prsentry.js"
+    "prsentry": "bin/prsentry.js"
   },
   "files": [
     "bin"
