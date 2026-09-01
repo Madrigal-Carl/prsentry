@@ -4,8 +4,9 @@ import "dotenv/config";
 import { Command } from "commander";
 import { Octokit } from "@octokit/rest";
 import { GoogleGenAI } from "@google/genai";
-import { writeFileSync, existsSync } from "fs";
+import { writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
+import prompts from "prompts";
 
 const program = new Command();
 
@@ -29,19 +30,74 @@ const DEFAULT_STYLE_GUIDE = `# Style Guide
 - Boolean variables should read like yes/no questions (e.g. isLoading, not loading_flag)
 `;
 
+const WORKFLOW_CONTENT = `name: PRsentry Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: Madrigal-Carl/prsentry@main
+        with:
+          gemini-api-key: \${{ secrets.GEMINI_API_KEY }}
+`;
+
+function createWorkflowFile() {
+    const workflowDir = join(process.cwd(), ".github", "workflows");
+    const workflowPath = join(workflowDir, "prsentry.yml");
+
+    if (existsSync(workflowPath)) {
+        console.log("GitHub Action workflow already exists. Skipping.");
+        return;
+    }
+
+    mkdirSync(workflowDir, { recursive: true });
+    writeFileSync(workflowPath, WORKFLOW_CONTENT);
+    console.log("✔ Created .github/workflows/prsentry.yml");
+}
+
 program
     .command("init")
-    .description(`Create a default ${STYLE_GUIDE_FILENAME} in the current directory`)
-    .action(() => {
-        const filePath = join(process.cwd(), STYLE_GUIDE_FILENAME);
+    .description(`Create a default ${STYLE_GUIDE_FILENAME}, optionally with a GitHub Action`)
+    .action(async () => {
+        const styleGuidePath = join(process.cwd(), STYLE_GUIDE_FILENAME);
 
-        if (existsSync(filePath)) {
+        if (existsSync(styleGuidePath)) {
             console.log(`${STYLE_GUIDE_FILENAME} already exists in this directory. Skipping.`);
-            return;
+        } else {
+            writeFileSync(styleGuidePath, DEFAULT_STYLE_GUIDE);
+            console.log(`✔ Created ${STYLE_GUIDE_FILENAME}`);
         }
 
-        writeFileSync(filePath, DEFAULT_STYLE_GUIDE);
-        console.log(`Created ${STYLE_GUIDE_FILENAME} — edit it to customize your review rules.`);
+        const response = await prompts({
+            type: "confirm",
+            name: "setupAction",
+            message: "Also set up a GitHub Action to run PRsentry automatically on new PRs?",
+            initial: false,
+        });
+
+        if (response.setupAction) {
+            createWorkflowFile();
+            console.log("Reminder: add GEMINI_API_KEY as a repo secret on GitHub (Settings → Secrets and variables → Actions) for the Action to work.");
+        } else {
+            console.log("Skipping GitHub Action setup. Run `prsentry add-action` later if you change your mind.");
+        }
+
+        console.log("Reminder: make sure GEMINI_API_KEY and GITHUB_TOKEN are set in your .env file to run `prsentry review` manually.");
+    });
+
+program
+    .command("add-action")
+    .description("Add the GitHub Action workflow file (if you skipped it during init)")
+    .action(() => {
+        createWorkflowFile();
+        console.log("Reminder: add GEMINI_API_KEY as a repo secret on GitHub (Settings → Secrets and variables → Actions) for the Action to work.");
     });
 
 async function fetchStyleGuide(octokit, owner, repo) {
