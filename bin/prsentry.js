@@ -12,22 +12,53 @@ const program = new Command();
 
 const STYLE_GUIDE_FILENAME = "PRSENTRY_STYLE_GUIDE.md";
 
-const DEFAULT_STYLE_GUIDE = `# Style Guide
+const DEFAULT_STYLE_GUIDE = `# Style Guide (MERN Stack)
 
-## Code Quality
-- No console.log statements left in production code
-- No hardcoded API keys, passwords, tokens, or secrets — use environment variables
-- Functions should not exceed 50 lines; split large functions into smaller ones
+## General Code Quality
+- No console.log statements left in production code (use a proper logger if needed)
+- No hardcoded API keys, passwords, tokens, secrets, or connection strings — use environment variables
+- Functions should not exceed 50 lines; split large functions into smaller, single-purpose ones
 - No commented-out code blocks left in — remove or explain why they're kept
+- No magic numbers/strings — use named constants for repeated or meaningful values
 
 ## Error Handling
 - All async functions must handle errors using try/catch or .catch()
-- API calls must handle failure cases, not just the happy path
-- Never swallow errors silently (empty catch blocks)
+- Never swallow errors silently (empty catch blocks, or catch blocks that only log without handling)
+- API route handlers must return proper HTTP status codes on failure, not just 200 with an error message
 
 ## Naming
 - Variable and function names must be descriptive, not single letters (except loop counters like i, j)
-- Boolean variables should read like yes/no questions (e.g. isLoading, not loading_flag)
+- Boolean variables should read like yes/no questions (e.g. isLoading, hasError — not loading_flag)
+- Files and components should use consistent casing (PascalCase for React components, camelCase for utilities)
+
+## Node.js / Express
+- Route handlers should not contain business logic directly — delegate to a service/controller layer
+- Middleware should be used for cross-cutting concerns (auth, validation, logging) instead of duplicating checks in every route
+- Input from req.body, req.query, and req.params must be validated before use — never trust client input directly
+- Avoid deeply nested callbacks; prefer async/await over .then() chains for readability
+
+## MongoDB / Mongoose
+- Schema fields that reference other documents should use proper ObjectId refs, not raw strings
+- Avoid unbounded queries (e.g. Model.find() with no limit) on collections that can grow large — paginate results
+- Sensitive fields (passwords, tokens) should use select: false in the schema so they aren't returned by default
+- Use .lean() for read-only queries where Mongoose document methods aren't needed, for performance
+
+## React (Frontend)
+- Components should not have more than 5-6 useState hooks — consider useReducer or splitting the component
+- useEffect hooks must list all dependencies in the dependency array — no suppressed lint warnings without justification
+- Avoid inline function definitions inside JSX for expensive operations (recreated on every render)
+- API calls should not be made directly inside component bodies — use useEffect, a data-fetching hook, or a query library
+- Props drilling more than 2-3 levels deep is a signal to consider Context or a state management library
+
+## Security
+- Never expose stack traces or internal error details to the client in production
+- CORS configuration should not use a wildcard origin (*) in production
+- Passwords must be hashed (e.g. bcrypt) before storage — never stored or logged in plain text
+- File uploads must validate file type and size before processing
+
+## API Design
+- Endpoints should follow REST conventions (proper use of GET/POST/PUT/PATCH/DELETE)
+- Response shapes should be consistent across endpoints (e.g. always { data, error } or similar)
 `;
 
 const WORKFLOW_CONTENT = `name: PRsentry Review
