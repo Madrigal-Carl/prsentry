@@ -2,10 +2,16 @@
   "name": "prsentry",
   "version": "1.0.0",
   "description": "AI-powered PR reviewer that checks pull requests against your repo's style guide",
-  "main": "index.js",
   "type": "module",
   "bin": {
     "prsentry": "./bin/prsentry.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Madrigal-Carl/prsentry.git"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -18,7 +24,7 @@
     "cli"
   ],
   "author": "Madrigal-Carl",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@google/genai": "^2.20.0",
     "@octokit/rest": "^22.0.1",
