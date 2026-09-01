@@ -20,7 +20,7 @@ Before anything gets posted, you get a say: PRsentry shows you each finding and 
 ## Installation
 
 ```bash
-npm install -g prsentry
+npm install prsentry
 ```
 
 Or run it without installing, via `npx`:
