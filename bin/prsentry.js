@@ -4,17 +4,61 @@ import "dotenv/config";
 import { Command } from "commander";
 import { Octokit } from "@octokit/rest";
 import { GoogleGenAI } from "@google/genai";
+import { writeFileSync, existsSync } from "fs";
+import { join } from "path";
 
 const program = new Command();
 
-// Hardcoded for now — this becomes a per-repo STYLE_GUIDE.md file later
-const STYLE_GUIDE = `
-- No console.log statements left in code
-- No hardcoded API keys, passwords, or secrets
-- Functions should not exceed 50 lines
-- Async functions must handle errors (try/catch or .catch())
-- Variable and function names should be descriptive, not single letters (except loop counters)
+const STYLE_GUIDE_FILENAME = "PRSENTRY_STYLE_GUIDE.md";
+
+const DEFAULT_STYLE_GUIDE = `# Style Guide
+
+## Code Quality
+- No console.log statements left in production code
+- No hardcoded API keys, passwords, tokens, or secrets — use environment variables
+- Functions should not exceed 50 lines; split large functions into smaller ones
+- No commented-out code blocks left in — remove or explain why they're kept
+
+## Error Handling
+- All async functions must handle errors using try/catch or .catch()
+- API calls must handle failure cases, not just the happy path
+- Never swallow errors silently (empty catch blocks)
+
+## Naming
+- Variable and function names must be descriptive, not single letters (except loop counters like i, j)
+- Boolean variables should read like yes/no questions (e.g. isLoading, not loading_flag)
 `;
+
+program
+    .command("init")
+    .description(`Create a default ${STYLE_GUIDE_FILENAME} in the current directory`)
+    .action(() => {
+        const filePath = join(process.cwd(), STYLE_GUIDE_FILENAME);
+
+        if (existsSync(filePath)) {
+            console.log(`${STYLE_GUIDE_FILENAME} already exists in this directory. Skipping.`);
+            return;
+        }
+
+        writeFileSync(filePath, DEFAULT_STYLE_GUIDE);
+        console.log(`Created ${STYLE_GUIDE_FILENAME} — edit it to customize your review rules.`);
+    });
+
+async function fetchStyleGuide(octokit, owner, repo) {
+    try {
+        const { data } = await octokit.rest.repos.getContent({
+            owner,
+            repo,
+            path: STYLE_GUIDE_FILENAME,
+        });
+        const content = Buffer.from(data.content, "base64").toString("utf-8");
+        console.log(`Using repo's ${STYLE_GUIDE_FILENAME}`);
+        return content;
+    } catch (error) {
+        console.log(`No ${STYLE_GUIDE_FILENAME} found in repo, using default style guide`);
+        return DEFAULT_STYLE_GUIDE;
+    }
+}
 
 const findingSchema = {
     type: "object",
@@ -65,6 +109,7 @@ program
 
         const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const styleGuide = await fetchStyleGuide(octokit, owner, repo);
 
         console.log(`Fetching PR #${prNumber} from ${owner}/${repo}...`);
 
@@ -90,7 +135,7 @@ program
                 model: "gemini-3.6-flash",
                 contents: `You are a strict code reviewer. Review the following diff against this style guide:
 
-${STYLE_GUIDE}
+${styleGuide}
 
 Only flag real violations of the style guide above. Reference exact file names and line numbers from the diff. If there are no issues, return an empty findings array.
 
