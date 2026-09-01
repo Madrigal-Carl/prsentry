@@ -1,6 +1,6 @@
 {
   "name": "prsentry",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "description": "AI-powered PR reviewer that checks pull requests against your repo's style guide",
   "type": "module",
   "bin": {

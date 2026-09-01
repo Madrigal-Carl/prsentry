@@ -4,6 +4,8 @@ import dotenv from "dotenv";
 import { Command } from "commander";
 import { Octokit } from "@octokit/rest";
 import { GoogleGenAI } from "@google/genai";
+import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { writeFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { join, resolve, isAbsolute } from "path";
 import prompts from "prompts";
@@ -12,6 +14,16 @@ const program = new Command();
 
 const STYLE_GUIDE_FILENAME = "PRSENTRY_STYLE_GUIDE.md";
 const CONFIG_FILENAME = ".prsentry-config.json";
+const DEFAULT_MODEL = "gemini-3.6-flash";
+
+// Keep each batch of diff sent to Gemini comfortably within its context window
+// (style guide + prompt scaffolding also eat into the budget).
+const MAX_DIFF_CHARS_PER_BATCH = 60000;
+
+// Retry policy for Gemini calls that get rate limited mid-run. Exponential
+// backoff starting at 2s: 2s, 4s, 8s.
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 2000;
 
 const DEFAULT_STYLE_GUIDE = `# Style Guide (MERN Stack)
 
@@ -62,6 +74,9 @@ const DEFAULT_STYLE_GUIDE = `# Style Guide (MERN Stack)
 - Response shapes should be consistent across endpoints (e.g. always { data, error } or similar)
 `;
 
+// NOTE: The GitHub Action integration is experimental. It works, but hasn't
+// seen enough real-world PR traffic yet to be considered battle-tested —
+// review its comments carefully rather than trusting auto-approve blindly.
 const WORKFLOW_CONTENT = `name: PRsentry Review
 
 on:
@@ -91,22 +106,22 @@ function createWorkflowFile() {
 
     mkdirSync(workflowDir, { recursive: true });
     writeFileSync(workflowPath, WORKFLOW_CONTENT);
-    console.log("✔ Created .github/workflows/prsentry.yml");
+    console.log("✔ Created .github/workflows/prsentry.yml (experimental)");
 }
 
 function readConfig() {
     const configPath = join(process.cwd(), CONFIG_FILENAME);
 
     if (!existsSync(configPath)) {
-        return { autoApprove: false, envPath: null };
+        return { autoApprove: false, envPath: null, model: null };
     }
 
     try {
         const raw = readFileSync(configPath, "utf-8");
-        return { autoApprove: false, envPath: null, ...JSON.parse(raw) };
+        return { autoApprove: false, envPath: null, model: null, ...JSON.parse(raw) };
     } catch (error) {
         console.log(`Warning: could not parse ${CONFIG_FILENAME}, using defaults.`);
-        return { autoApprove: false, envPath: null };
+        return { autoApprove: false, envPath: null, model: null };
     }
 }
 
@@ -146,6 +161,10 @@ function resolveEnvPath(cliEnvPath, config) {
     return isAbsolute(candidate) ? candidate : resolve(process.cwd(), candidate);
 }
 
+function resolveModel(cliModel, config) {
+    return cliModel || process.env.GEMINI_MODEL || config.model || DEFAULT_MODEL;
+}
+
 function loadEnv(cliEnvPath, config) {
     const envPath = resolveEnvPath(cliEnvPath, config);
 
@@ -160,7 +179,7 @@ function loadEnv(cliEnvPath, config) {
 program
     .name("prsentry")
     .description("AI-powered PR reviewer that checks pull requests against your repo's style guide")
-    .version("1.0.4")
+    .version("1.1.0")
     .option(
         "-e, --env-file <path>",
         "path to a .env file containing GEMINI_API_KEY and GITHUB_TOKEN (overrides config and PRSENTRY_ENV_FILE)"
@@ -182,18 +201,19 @@ program
         const response = await prompts({
             type: "select",
             name: "setupAction",
-            message: "Also set up a GitHub Action to run PRsentry automatically on new PRs?",
+            message: "Also set up a GitHub Action to run PRsentry automatically on new PRs? (experimental — off by default)",
             choices: [
-                { title: "Yes", value: true },
                 { title: "No", value: false },
+                { title: "Yes", value: true },
             ],
+            initial: 0,
         });
 
         if (response.setupAction) {
             createWorkflowFile();
-            console.log("Reminder: add GEMINI_API_KEY as a repo secret on GitHub (Settings → Secrets and variables → Actions) for the Action to work.");
+            console.log("Reminder: this integration is experimental. Add GEMINI_API_KEY as a repo secret on GitHub (Settings → Secrets and variables → Actions) for the Action to work.");
         } else {
-            console.log("Skipping GitHub Action setup. Run `prsentry add-action` later if you change your mind.");
+            console.log("Skipping GitHub Action setup. Run `prsentry add-action` later if you change your mind (still experimental).");
         }
 
         const customEnvResponse = await prompts({
@@ -229,10 +249,10 @@ program
 
 program
     .command("add-action")
-    .description("Add the GitHub Action workflow file (if you skipped it during init)")
+    .description("Add the GitHub Action workflow file (experimental, if you skipped it during init)")
     .action(() => {
         createWorkflowFile();
-        console.log("Reminder: add GEMINI_API_KEY as a repo secret on GitHub (Settings → Secrets and variables → Actions) for the Action to work.");
+        console.log("Reminder: this integration is experimental. Add GEMINI_API_KEY as a repo secret on GitHub (Settings → Secrets and variables → Actions) for the Action to work.");
     });
 
 program
@@ -270,6 +290,22 @@ program
         }
     });
 
+program
+    .command("set-model")
+    .description("Set (or clear) the Gemini model PRsentry should use by default")
+    .argument("[model]", `model name (e.g. ${DEFAULT_MODEL}); omit to clear the saved model`)
+    .action((model) => {
+        const config = readConfig();
+        config.model = model || null;
+        writeConfig(config);
+
+        if (model) {
+            console.log(`✔ Default model saved to ${CONFIG_FILENAME}: ${model}`);
+        } else {
+            console.log(`✔ Cleared saved model. PRsentry will fall back to GEMINI_MODEL or the built-in default (${DEFAULT_MODEL}).`);
+        }
+    });
+
 function loadStyleGuide() {
     const styleGuidePath = join(process.cwd(), STYLE_GUIDE_FILENAME);
 
@@ -282,25 +318,192 @@ function loadStyleGuide() {
     return DEFAULT_STYLE_GUIDE;
 }
 
-const findingSchema = {
-    type: "object",
-    properties: {
-        findings: {
-            type: "array",
-            items: {
-                type: "object",
-                properties: {
-                    file: { type: "string" },
-                    line: { type: "integer" },
-                    severity: { type: "string", enum: ["low", "medium", "high"] },
-                    comment: { type: "string" },
-                },
-                required: ["file", "line", "severity", "comment"],
-            },
-        },
-    },
-    required: ["findings"],
-};
+// Single source of truth for the shape of a finding. The JSON schema handed
+// to Gemini's responseSchema is derived from this zod schema (below) rather
+// than hand-duplicated, so the two can't silently drift apart when one is
+// edited and the other isn't.
+const findingZodSchema = z.object({
+    findings: z.array(
+        z.object({
+            file: z.string(),
+            line: z.number().int(),
+            severity: z.enum(["low", "medium", "high"]),
+            comment: z.string(),
+        })
+    ),
+});
+
+// openApi3 target avoids draft-7-only keywords (like $schema, additionalProperties
+// defaults) that Gemini's structured-output schema doesn't understand, and
+// inlines the schema instead of using $ref/$defs since we're not naming it.
+const findingSchema = zodToJsonSchema(findingZodSchema, { target: "openApi3" });
+
+// Splits a unified diff into one chunk per file, so large diffs can be
+// batched without cutting a file's diff in half mid-hunk.
+function splitDiffIntoFileChunks(diff) {
+    const lines = diff.split("\n");
+    const chunks = [];
+    let current = [];
+
+    for (const line of lines) {
+        if (line.startsWith("diff --git ") && current.length > 0) {
+            chunks.push(current.join("\n"));
+            current = [];
+        }
+        current.push(line);
+    }
+    if (current.length > 0) {
+        chunks.push(current.join("\n"));
+    }
+
+    return chunks;
+}
+
+// Groups per-file diff chunks into batches that each stay under
+// maxCharsPerBatch, so a single Gemini request never blows past its context
+// window on a large PR. A single file whose diff alone exceeds the budget is
+// truncated on its own, with a clear note in place of the missing content.
+function batchFileChunks(chunks, maxCharsPerBatch) {
+    const batches = [];
+    let currentBatch = [];
+    let currentLength = 0;
+
+    for (const chunk of chunks) {
+        if (chunk.length > maxCharsPerBatch) {
+            if (currentBatch.length > 0) {
+                batches.push(currentBatch);
+                currentBatch = [];
+                currentLength = 0;
+            }
+            const truncated =
+                chunk.slice(0, maxCharsPerBatch) +
+                "\n\n[... file truncated by PRsentry — diff too large to review in full ...]";
+            batches.push([truncated]);
+            continue;
+        }
+
+        if (currentLength + chunk.length > maxCharsPerBatch && currentBatch.length > 0) {
+            batches.push(currentBatch);
+            currentBatch = [];
+            currentLength = 0;
+        }
+
+        currentBatch.push(chunk);
+        currentLength += chunk.length;
+    }
+
+    if (currentBatch.length > 0) {
+        batches.push(currentBatch);
+    }
+
+    return batches;
+}
+
+function sleep(ms) {
+    return new Promise((res) => setTimeout(res, ms));
+}
+
+// Recognizes a Gemini rate-limit error across the shapes the SDK/HTTP layer
+// might throw it in (a numeric status/code, or a message mentioning 429 /
+// RESOURCE_EXHAUSTED), since the SDK doesn't guarantee one consistent form.
+function isRateLimitError(error) {
+    const status = error?.status ?? error?.code;
+    if (status === 429 || status === "429" || status === "RESOURCE_EXHAUSTED") {
+        return true;
+    }
+    return /\b429\b|RESOURCE_EXHAUSTED|rate limit/i.test(error?.message || "");
+}
+
+// Wraps a single Gemini generateContent call with exponential backoff, but
+// only for rate-limit errors — anything else (bad API key, invalid model,
+// malformed request) fails immediately rather than retrying a request that
+// will never succeed.
+async function generateContentWithRetry(ai, params, batchLabel) {
+    let attempt = 0;
+
+    for (; ;) {
+        try {
+            return await ai.models.generateContent(params);
+        } catch (error) {
+            if (!isRateLimitError(error) || attempt >= MAX_RETRIES) {
+                throw error;
+            }
+
+            const delayMs = RETRY_BASE_DELAY_MS * 2 ** attempt;
+            attempt += 1;
+            console.log(`Rate limited by Gemini on ${batchLabel} — retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt}/${MAX_RETRIES})...`);
+            await sleep(delayMs);
+        }
+    }
+}
+
+// Parses a unified diff into a Map of file path -> Set of line numbers that
+// actually exist on the "RIGHT" (post-change) side. GitHub only accepts a
+// review comment on a line that's part of the diff; a finding referencing a
+// file/line Gemini hallucinated would otherwise cause GitHub to reject that
+// comment (and, if posted as part of a single batched review, potentially
+// the whole review). Used to filter findings before posting rather than
+// discovering the problem at request time.
+function buildValidLineIndex(diff) {
+    const index = new Map();
+    let currentFile = null;
+    let rightLine = null;
+
+    for (const line of diff.split("\n")) {
+        const fileMatch = line.match(/^\+\+\+ b\/(.+)$/);
+        if (fileMatch) {
+            currentFile = fileMatch[1];
+            if (!index.has(currentFile)) {
+                index.set(currentFile, new Set());
+            }
+            rightLine = null;
+            continue;
+        }
+
+        const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (hunkMatch) {
+            rightLine = Number(hunkMatch[1]);
+            continue;
+        }
+
+        if (currentFile === null || rightLine === null) {
+            continue;
+        }
+
+        if (line.startsWith("+")) {
+            index.get(currentFile).add(rightLine);
+            rightLine += 1;
+        } else if (line.startsWith("-")) {
+            // Removed line — doesn't exist on the RIGHT side, don't advance.
+        } else if (line.startsWith(" ")) {
+            // Context line — exists on both sides.
+            index.get(currentFile).add(rightLine);
+            rightLine += 1;
+        }
+        // Lines like "diff --git", "index ...", "---" carry no line-number info.
+    }
+
+    return index;
+}
+
+// Splits findings into ones that reference a real file/line in the diff and
+// ones that don't (likely hallucinated), so the latter can be dropped with a
+// clear warning instead of failing when posted to GitHub.
+function partitionFindingsByValidity(findings, validLineIndex) {
+    const valid = [];
+    const invalid = [];
+
+    for (const finding of findings) {
+        const validLines = validLineIndex.get(finding.file);
+        if (validLines && validLines.has(finding.line)) {
+            valid.push(finding);
+        } else {
+            invalid.push(finding);
+        }
+    }
+
+    return { valid, invalid };
+}
 
 async function reviewFindings(findings, config) {
     if (config.autoApprove) {
@@ -353,6 +556,7 @@ program
     .argument("<pr-number>", "the pull request number to review")
     .option("-r, --repo <owner/repo>", "the GitHub repo to review (e.g. octocat/hello-world)")
     .option("--auto-approve", "apply all findings automatically without an interactive prompt (does not persist to config — use for CI, where there's no TTY)")
+    .option("--model <model>", `Gemini model to use for this run (overrides GEMINI_MODEL env var and saved config; default: ${DEFAULT_MODEL})`)
     .action(async (prNumber, options, command) => {
         if (!options.repo) {
             console.error("Error: --repo is required (e.g. --repo owner/reponame)");
@@ -385,6 +589,7 @@ program
 
         const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const model = resolveModel(options.model, config);
 
         console.log(`Fetching PR #${prNumber} from ${owner}/${repo}...`);
 
@@ -420,32 +625,90 @@ program
             process.exit(1);
         }
 
-        console.log("Sending diff to Gemini for review...");
+        const fileChunks = splitDiffIntoFileChunks(diff);
+        const batches = batchFileChunks(fileChunks, MAX_DIFF_CHARS_PER_BATCH);
 
-        let result;
-        try {
-            const response = await ai.models.generateContent({
-                model: "gemini-3.6-flash",
-                contents: `You are a strict code reviewer. Review the following diff against this style guide:
+        if (batches.length > 1) {
+            console.log(`Diff is large (${diff.length} chars, ${fileChunks.length} file(s)) — splitting into ${batches.length} batches for review.`);
+        }
+
+        let allFindings = [];
+        const failedBatches = [];
+
+        for (let i = 0; i < batches.length; i++) {
+            const batchDiff = batches[i].join("\n");
+            const batchLabel = `batch ${i + 1}/${batches.length}`;
+            console.log(`Sending ${batchLabel} to Gemini (model: ${model})...`);
+
+            let response;
+            try {
+                response = await generateContentWithRetry(
+                    ai,
+                    {
+                        model,
+                        contents: `You are a strict code reviewer. Review the following diff against this style guide:
 
 ${styleGuide}
 
 Only flag real violations of the style guide above. Reference exact file names and line numbers from the diff. If there are no issues, return an empty findings array.
 
 DIFF:
-${diff}`,
-                config: {
-                    temperature: 0,
-                    responseMimeType: "application/json",
-                    responseSchema: findingSchema,
-                },
-            });
+${batchDiff}`,
+                        config: {
+                            temperature: 0,
+                            responseMimeType: "application/json",
+                            responseSchema: findingSchema,
+                        },
+                    },
+                    batchLabel
+                );
+            } catch (error) {
+                // A batch that fails even after retries doesn't take down the whole
+                // run — whatever findings other batches already produced are kept,
+                // and we surface the failure clearly at the end instead.
+                console.error(`Failed to get review from Gemini for ${batchLabel} after retries:`, error.message);
+                failedBatches.push(i + 1);
+                continue;
+            }
 
-            result = JSON.parse(response.text);
-        } catch (error) {
-            console.error("Failed to get review from Gemini:", error.message);
-            process.exit(1);
+            let parsed;
+            try {
+                parsed = JSON.parse(response.text);
+            } catch (error) {
+                console.error(`Warning: Gemini's response for ${batchLabel} wasn't valid JSON — skipping this batch's findings.`);
+                continue;
+            }
+
+            const validated = findingZodSchema.safeParse(parsed);
+            if (!validated.success) {
+                console.error(`Warning: Gemini's response for ${batchLabel} didn't match the expected shape — skipping this batch's findings.`);
+                for (const issue of validated.error.issues) {
+                    console.error(`  - ${issue.path.join(".") || "(root)"}: ${issue.message}`);
+                }
+                continue;
+            }
+
+            allFindings = allFindings.concat(validated.data.findings);
         }
+
+        if (failedBatches.length > 0) {
+            console.log(`\nWarning: ${failedBatches.length} of ${batches.length} batch(es) failed and were skipped (batch #${failedBatches.join(", #")}). The findings below only reflect the batches that succeeded — re-run \`prsentry review\` to retry the whole PR if you want full coverage.`);
+        }
+
+        // Drop findings that reference a file/line not actually present in the
+        // diff — almost always a model hallucination — rather than letting a
+        // bad position fail when posted to GitHub.
+        const validLineIndex = buildValidLineIndex(diff);
+        const { valid: validFindings, invalid: invalidFindings } = partitionFindingsByValidity(allFindings, validLineIndex);
+
+        if (invalidFindings.length > 0) {
+            console.log(`\nDropped ${invalidFindings.length} finding(s) that referenced a file/line not present in the diff (likely a model hallucination):`);
+            for (const f of invalidFindings) {
+                console.log(`  - ${f.file}:${f.line}`);
+            }
+        }
+
+        const result = { findings: validFindings };
 
         console.log("--- REVIEW FINDINGS ---");
         if (result.findings.length === 0) {
@@ -467,27 +730,50 @@ ${diff}`,
 
         console.log(`\nPosting ${approvedFindings.length} approved comment(s) to GitHub...`);
 
-        try {
-            await octokit.rest.pulls.createReview({
-                owner,
-                repo,
-                pull_number: Number(prNumber),
-                commit_id: prMeta.head.sha,
-                event: "COMMENT",
-                body: `PRsentry found ${approvedFindings.length} approved issue(s) based on the repo's style guide.`,
-                comments: approvedFindings.map((f) => ({
-                    path: f.file,
-                    line: f.line,
-                    side: "RIGHT",
-                    body: `**[${f.severity.toUpperCase()}]** ${f.comment}`,
-                })),
-            });
+        // Posted one at a time (rather than as a single batched review) so that
+        // one comment GitHub rejects — a stale position, a race with a force-push,
+        // etc. — doesn't take the rest of the approved findings down with it.
+        let posted = 0;
+        let failedToPost = 0;
 
-            console.log("Review posted successfully!");
-        } catch (error) {
-            console.error("Failed to post review to GitHub:", error.message);
+        for (const finding of approvedFindings) {
+            try {
+                await octokit.rest.pulls.createReviewComment({
+                    owner,
+                    repo,
+                    pull_number: Number(prNumber),
+                    commit_id: prMeta.head.sha,
+                    path: finding.file,
+                    line: finding.line,
+                    side: "RIGHT",
+                    body: `**[${finding.severity.toUpperCase()}]** ${finding.comment}`,
+                });
+                posted += 1;
+            } catch (error) {
+                failedToPost += 1;
+                console.error(`Failed to post comment on ${finding.file}:${finding.line}:`, error.message);
+            }
+        }
+
+        if (posted > 0) {
+            try {
+                await octokit.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: Number(prNumber),
+                    body: `PRsentry found ${approvedFindings.length} approved issue(s) based on the repo's style guide. ${posted} posted as inline comment(s)${failedToPost > 0 ? `, ${failedToPost} failed to post — see the run logs.` : "."}`,
+                });
+            } catch (error) {
+                console.error("Failed to post summary comment to GitHub:", error.message);
+            }
+        }
+
+        if (failedToPost > 0) {
+            console.error(`\n${posted} comment(s) posted, ${failedToPost} failed.`);
             process.exit(1);
         }
+
+        console.log(`\n${posted} comment(s) posted successfully!`);
     });
 
 program.parse();
