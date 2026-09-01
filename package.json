@@ -1,13 +1,29 @@
 {
   "name": "prsentry",
   "version": "1.0.0",
-  "description": "",
+  "description": "AI-powered PR reviewer that checks pull requests against your repo's style guide",
   "main": "index.js",
+  "type": "module",
+  "bin": {
+    "prsentry": "./bin/prsentry.js"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": [
+    "ai",
+    "code-review",
+    "github",
+    "pull-request",
+    "cli"
+  ],
   "author": "",
   "license": "ISC",
-  "type": "commonjs"
+  "dependencies": {
+    "@google/genai": "^2.20.0",
+    "@octokit/rest": "^22.0.1",
+    "commander": "^15.0.0",
+    "dotenv": "^17.4.2",
+    "zod": "^4.5.4"
+  }
 }
